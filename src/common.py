@@ -15,7 +15,12 @@ PRESIGN_EXPIRES_IN = 300  # 5 minutes
 CLEANUP_TTL_BUFFER = 86400  # DynamoDB TTL fires one day after link expiry
 
 dynamodb = boto3.resource("dynamodb")
-s3 = boto3.client("s3", config=boto3.session.Config(signature_version="s3v4"))
+s3 = boto3.client(
+    "s3",
+    region_name=REGION,
+    endpoint_url=f"https://s3.{REGION}.amazonaws.com",
+    config=boto3.session.Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+)
 
 
 def table():
