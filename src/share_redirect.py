@@ -1,22 +1,22 @@
 from common import BUCKET_NAME, PRESIGN_EXPIRES_IN, now_epoch, s3, table
 
-EXPIRED_HTML = """<!DOCTYPE html>
+PAGE_HTML = """<!DOCTYPE html>
 <html>
-<head><title>Link expired</title>
+<head><title>{title}</title>
 <style>body{{font-family:sans-serif;text-align:center;margin-top:15%;color:#333}}</style>
 </head>
 <body>
-<h1>This link has expired</h1>
+<h1>{title}</h1>
 <p>{message}</p>
 </body>
 </html>"""
 
 
-def _html_response(status_code, message):
+def _html_response(status_code, title, message):
     return {
         "statusCode": status_code,
         "headers": {"Content-Type": "text/html"},
-        "body": EXPIRED_HTML.format(message=message),
+        "body": PAGE_HTML.format(title=title, message=message),
     }
 
 
@@ -25,10 +25,10 @@ def handler(event, context):
     item = table().get_item(Key={"fileId": file_id}).get("Item")
 
     if not item:
-        return _html_response(404, "This share link does not exist.")
+        return _html_response(404, "Link not found", "This share link does not exist.")
 
     if now_epoch() > int(item["expiresAt"]):
-        return _html_response(410, "The file is no longer available.")
+        return _html_response(410, "This link has expired", "The file is no longer available.")
 
     table().update_item(
         Key={"fileId": file_id},
