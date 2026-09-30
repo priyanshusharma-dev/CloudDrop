@@ -278,8 +278,12 @@
   async function shareFile(fileId) {
     try {
       const data = await apiFetch(`/files/${fileId}/share`, { method: "POST" });
-      await navigator.clipboard.writeText(data.shareUrl).catch(() => {});
-      alert("Share link copied to clipboard:\n" + data.shareUrl);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(data.shareUrl).catch(() => {});
+        alert("Share link copied to clipboard:\n" + data.shareUrl);
+      } else {
+        prompt("Copy this share link:", data.shareUrl);
+      }
     } catch (err) {
       alert(err.message);
     }
