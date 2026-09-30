@@ -1,0 +1,302 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CloudDrop - serverless file sharing with expiring links.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 15
+    MemorySize: 256
+    Handler: app.handler
+
+Resources:
+
+  ##############################
+  # Storage
+  ##############################
+
+  FilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteLeftoverObjects
+            Status: Enabled
+            ExpirationInDays: 3
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+
+  FilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fileId
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fileId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ownerId-index
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ##############################
+  # Auth
+  ##############################
+
+  PreSignupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: pre_signup.handler
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+          RequireUppercase: false
+      LambdaConfig:
+        PreSignUp: !GetAtt PreSignupFunction.Arn
+
+  PreSignupInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PreSignupFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      GenerateSecret: false
+
+  ##############################
+  # API
+  ##############################
+
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  GetUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: get_upload_url.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FilesTable
+          BUCKET_NAME: !Ref FilesBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /upload-url
+            Method: POST
+
+  ListFilesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: list_files.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FilesTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref FilesTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /files
+            Method: GET
+
+  CreateShareLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: create_share_link.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FilesTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref FilesTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /files/{id}/share
+            Method: POST
+
+  DeleteFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: delete_file.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FilesTable
+          BUCKET_NAME: !Ref FilesBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /files/{id}
+            Method: DELETE
+
+  ShareRedirectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: share_redirect.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FilesTable
+          BUCKET_NAME: !Ref FilesBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        - S3ReadPolicy:
+            BucketName: !Ref FilesBucket
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /share/{id}
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+  CleanupExpiredFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: cleanup_expired.handler
+      Timeout: 60
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FilesTable
+          BUCKET_NAME: !Ref FilesBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
+      Events:
+        HourlySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the REST API
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  UserPoolId:
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+
+  FilesBucketName:
+    Value: !Ref FilesBucket
+
+  FilesTableName:
+    Value: !Ref FilesTable
+
+  WebsiteBucketName:
+    Value: !Ref WebsiteBucket
+
+  WebsiteURL:
+    Description: Static website URL
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+
+  CleanupFunctionName:
+    Value: !Ref CleanupExpiredFunction

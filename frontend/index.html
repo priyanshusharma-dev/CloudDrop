@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CloudDrop - Expiring File Sharing</title>
+<script src="https://sdk.amazonaws.com/js/aws-sdk-2.1550.0.min.js"></script>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    margin: 0; background: #f4f6fb; color: #1a1d29;
+  }
+  header {
+    background: #2b3a67; color: white; padding: 18px 28px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 20px; }
+  #userBar { font-size: 14px; display: flex; gap: 12px; align-items: center; }
+  #userBar button { background: #4a5a8c; }
+  main { max-width: 760px; margin: 32px auto; padding: 0 16px; }
+  .card {
+    background: white; border-radius: 10px; padding: 24px; margin-bottom: 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  h2 { margin-top: 0; font-size: 17px; }
+  input, select {
+    width: 100%; padding: 10px 12px; margin: 6px 0 14px; border: 1px solid #cfd6e6;
+    border-radius: 6px; font-size: 14px;
+  }
+  button {
+    background: #3a5bd9; color: white; border: none; padding: 10px 18px;
+    border-radius: 6px; font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: #2f4bb8; }
+  button.secondary { background: #e7eaf5; color: #2b3a67; }
+  button.danger { background: #d9534f; }
+  .error { color: #d9534f; font-size: 13px; margin: -8px 0 12px; }
+  .msg { color: #2b3a67; font-size: 13px; margin: -8px 0 12px; }
+  .hidden { display: none !important; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eef0f7; font-size: 13px; }
+  .status-active { color: #1a7a3f; font-weight: 600; }
+  .status-expired { color: #999; font-weight: 600; }
+  .progress { height: 6px; background: #eef0f7; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .progress-bar { height: 100%; width: 0%; background: #3a5bd9; transition: width .2s; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tabs button { flex: 1; }
+  .row-actions button { margin-right: 6px; padding: 5px 10px; font-size: 12px; }
+  footer { text-align: center; color: #9099b3; font-size: 12px; padding: 24px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CloudDrop</h1>
+  <div id="userBar" class="hidden">
+    <span id="userEmail"></span>
+    <button onclick="signOut()">Sign out</button>
+  </div>
+</header>
+
+<main>
+
+  <div id="authView" class="card">
+    <div class="tabs">
+      <button id="tabSignIn" class="secondary" onclick="showTab('signin')">Sign in</button>
+      <button id="tabSignUp" class="secondary" onclick="showTab('signup')">Sign up</button>
+    </div>
+
+    <div id="signinForm">
+      <h2>Sign in</h2>
+      <input id="signinEmail" type="email" placeholder="Email" />
+      <input id="signinPassword" type="password" placeholder="Password" />
+      <div id="signinError" class="error hidden"></div>
+      <button onclick="signIn()">Sign in</button>
+    </div>
+
+    <div id="signupForm" class="hidden">
+      <h2>Sign up</h2>
+      <input id="signupEmail" type="email" placeholder="Email" />
+      <input id="signupPassword" type="password" placeholder="Password (min 8 characters)" />
+      <div id="signupError" class="error hidden"></div>
+      <button onclick="signUp()">Create account</button>
+    </div>
+  </div>
+
+  <div id="appView" class="hidden">
+
+    <div class="card">
+      <h2>Upload a file</h2>
+      <input id="fileInput" type="file" />
+      <select id="expirySelect">
+        <option value="120">2 minutes (demo)</option>
+        <option value="900">15 minutes</option>
+        <option value="3600" selected>1 hour</option>
+        <option value="86400">24 hours</option>
+      </select>
+      <div id="uploadError" class="error hidden"></div>
+      <div id="uploadMsg" class="msg hidden"></div>
+      <div class="progress hidden" id="progressWrap">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+      <button onclick="uploadFile()">Upload</button>
+    </div>
+
+    <div class="card">
+      <h2>Your files</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Size</th><th>Time left</th><th>Downloads</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="filesBody"></tbody>
+      </table>
+    </div>
+
+  </div>
+
+</main>
+
+<footer>CloudDrop &mdash; serverless file sharing with expiring links</footer>
+
+<script>
+  const CONFIG = {
+    apiUrl: "{{API_URL}}",
+    userPoolId: "{{USER_POOL_ID}}",
+    userPoolClientId: "{{USER_POOL_CLIENT_ID}}",
+    region: "{{REGION}}",
+  };
+
+  if (CONFIG.apiUrl.startsWith("{{")) {
+    document.body.innerHTML =
+      '<div style="text-align:center;margin-top:15%;font-family:sans-serif">' +
+      "<h2>Configuration missing</h2>" +
+      "<p>Open <code>dist/index.html</code> or the deployed website URL, not this raw file.</p>" +
+      "</div>";
+    throw new Error("Configuration missing");
+  }
+
+  AWS.config.region = CONFIG.region;
+  const cognito = new AWS.CognitoIdentityServiceProvider();
+
+  let session = null; // { idToken, email }
+
+  function showTab(tab) {
+    document.getElementById("signinForm").classList.toggle("hidden", tab !== "signin");
+    document.getElementById("signupForm").classList.toggle("hidden", tab !== "signup");
+  }
+
+  function setError(id, message) {
+    const el = document.getElementById(id);
+    if (!message) { el.classList.add("hidden"); el.textContent = ""; return; }
+    el.textContent = message;
+    el.classList.remove("hidden");
+  }
+
+  async function signUp() {
+    setError("signupError", "");
+    const email = document.getElementById("signupEmail").value.trim();
+    const password = document.getElementById("signupPassword").value;
+    if (!email || password.length < 8) {
+      setError("signupError", "Enter a valid email and a password of at least 8 characters.");
+      return;
+    }
+    try {
+      await cognito.signUp({
+        ClientId: CONFIG.userPoolClientId,
+        Username: email,
+        Password: password,
+        UserAttributes: [{ Name: "email", Value: email }],
+      }).promise();
+      await doSignIn(email, password);
+    } catch (err) {
+      setError("signupError", err.message || "Sign up failed.");
+    }
+  }
+
+  async function signIn() {
+    setError("signinError", "");
+    const email = document.getElementById("signinEmail").value.trim();
+    const password = document.getElementById("signinPassword").value;
+    try {
+      await doSignIn(email, password);
+    } catch (err) {
+      setError("signinError", "Incorrect email or password.");
+    }
+  }
+
+  async function doSignIn(email, password) {
+    const result = await cognito.initiateAuth({
+      AuthFlow: "USER_PASSWORD_AUTH",
+      ClientId: CONFIG.userPoolClientId,
+      AuthParameters: { USERNAME: email, PASSWORD: password },
+    }).promise();
+
+    session = { idToken: result.AuthenticationResult.IdToken, email };
+    enterApp();
+  }
+
+  function signOut() {
+    session = null;
+    document.getElementById("appView").classList.add("hidden");
+    document.getElementById("authView").classList.remove("hidden");
+    document.getElementById("userBar").classList.add("hidden");
+  }
+
+  function enterApp() {
+    document.getElementById("authView").classList.add("hidden");
+    document.getElementById("appView").classList.remove("hidden");
+    document.getElementById("userBar").classList.remove("hidden");
+    document.getElementById("userEmail").textContent = session.email;
+    refreshFiles();
+  }
+
+  async function apiFetch(path, options = {}) {
+    const res = await fetch(CONFIG.apiUrl + path, {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        Authorization: session.idToken,
+      },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.message || ("Request failed: " + res.status));
+    }
+    return res.status === 204 ? null : res.json();
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function formatTimeLeft(seconds) {
+    if (seconds <= 0) return "Expired";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  async function refreshFiles() {
+    try {
+      const data = await apiFetch("/files");
+      renderFiles(data.files || []);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  function renderFiles(files) {
+    const body = document.getElementById("filesBody");
+    body.innerHTML = "";
+    for (const f of files) {
+      const tr = document.createElement("tr");
+      const statusClass = f.status === "expired" ? "status-expired" : "status-active";
+      tr.innerHTML = `
+        <td>${f.fileName}</td>
+        <td>${formatSize(f.size)}</td>
+        <td class="${statusClass}">${formatTimeLeft(f.timeLeft)}</td>
+        <td>${f.downloadCount}</td>
+        <td class="row-actions">
+          <button class="secondary" data-action="share" ${f.status === "expired" ? "disabled" : ""}>Copy share link</button>
+          <button class="danger" data-action="delete">Delete</button>
+        </td>
+      `;
+      tr.querySelector('[data-action="share"]').addEventListener("click", () => shareFile(f.fileId));
+      tr.querySelector('[data-action="delete"]').addEventListener("click", () => deleteFile(f.fileId));
+      body.appendChild(tr);
+    }
+  }
+
+  async function shareFile(fileId) {
+    try {
+      const data = await apiFetch(`/files/${fileId}/share`, { method: "POST" });
+      await navigator.clipboard.writeText(data.shareUrl).catch(() => {});
+      alert("Share link copied to clipboard:\n" + data.shareUrl);
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  async function deleteFile(fileId) {
+    if (!confirm("Delete this file?")) return;
+    try {
+      await apiFetch(`/files/${fileId}`, { method: "DELETE" });
+      refreshFiles();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  async function uploadFile() {
+    setError("uploadError", "");
+    document.getElementById("uploadMsg").classList.add("hidden");
+    const input = document.getElementById("fileInput");
+    const file = input.files[0];
+    const expirySeconds = parseInt(document.getElementById("expirySelect").value, 10);
+
+    if (!file) {
+      setError("uploadError", "Choose a file first.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setError("uploadError", "File exceeds the 10 MB limit.");
+      return;
+    }
+
+    try {
+      const meta = await apiFetch("/upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: file.name,
+          fileSize: file.size,
+          contentType: file.type || "application/octet-stream",
+          expirySeconds,
+        }),
+      });
+
+      await putWithProgress(meta.uploadUrl, file);
+
+      document.getElementById("uploadMsg").textContent = "Upload complete.";
+      document.getElementById("uploadMsg").classList.remove("hidden");
+      input.value = "";
+      document.getElementById("progressWrap").classList.add("hidden");
+      document.getElementById("progressBar").style.width = "0%";
+      refreshFiles();
+    } catch (err) {
+      setError("uploadError", err.message || "Upload failed.");
+    }
+  }
+
+  function putWithProgress(url, file) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", url);
+      xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      const wrap = document.getElementById("progressWrap");
+      const bar = document.getElementById("progressBar");
+      wrap.classList.remove("hidden");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          bar.style.width = Math.round((e.loaded / e.total) * 100) + "%";
+        }
+      };
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error("Upload to storage failed.")));
+      xhr.onerror = () => reject(new Error("Upload to storage failed."));
+      xhr.send(file);
+    });
+  }
+</script>
+
+</body>
+</html>
